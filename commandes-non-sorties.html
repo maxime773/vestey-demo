@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<!-- OUTIL
+     titre: Commandes non sorties
+     description: Repère les commandes non expédiées dont la date de chargement est dépassée ou imminente, classées par criticité.
+     categorie: ADV
+     ia: non
+-->
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Commandes non sorties — Vestey Foods</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="exceljs.min.js"></script>
+<script src="feedback.js"></script>
+<style>
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:20px}
+  .kpi{border:1px solid var(--line-2);border-radius:var(--radius);padding:14px 16px;background:#fff}
+  .kpi.crit{border-left:4px solid #B3261E}
+  .kpi.warn{border-left:4px solid #B8860B}
+  .kpi.soon{border-left:4px solid var(--signal)}
+  .kpi.ok{border-left:4px solid var(--ok)}
+  .kpi .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate)}
+  .kpi .v{font-size:1.7rem;font-weight:800;margin-top:4px;line-height:1}
+  @media(max-width:700px){.kpis{grid-template-columns:1fr 1fr}}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
+  .b-crit{color:#B3261E;background:#FBE9E7}
+  .b-warn{color:#8A6412;background:#FBF3E2}
+  .b-soon{color:#8A4B12;background:#FCEBD6}
+  .b-ok{color:var(--ok);background:var(--ok-soft)}
+  .filters{display:flex;gap:8px;margin-top:20px;flex-wrap:wrap}
+  .fbtn{font-family:var(--mono);font-size:11.5px;padding:7px 12px;border:1px solid var(--line-2);background:#fff;border-radius:999px;cursor:pointer;color:var(--slate)}
+  .fbtn.on{background:var(--steel);color:var(--paper);border-color:var(--steel)}
+  .exp{margin-left:auto}
+  td.late{font-weight:700;color:#B3261E}
+</style>
+</head>
+<body>
+<div class="wrap tool-page">
+  <a class="back" href="index.html">← Catalogue</a>
+
+  <section class="tool-hero">
+    <span class="eyebrow">ADV · 01</span>
+    <h1>Commandes non sorties</h1>
+    <p>Déposez l'export des commandes : l'outil isole celles qui ne sont pas encore expédiées et les classe selon leur date de chargement prévue — retards d'abord, puis les échéances proches.</p>
+  </section>
+
+  <div class="panel">
+    <div class="panel-strip"><span class="k">TRAITEMENT</span> local · aucun envoi réseau · .xlsx / .csv</div>
+    <div class="panel-body">
+
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Déposer l'export des commandes">
+        <div class="drop-icon">📦</div>
+        <div class="drop-title">Glissez l'export des commandes</div>
+        <div class="drop-hint">.xlsx ou .csv — colonnes attendues : commande, client, statut, date de chargement…</div>
+        <input type="file" id="file" accept=".xlsx,.csv" hidden />
+      </div>
+
+      <button class="run" id="run" disabled>Analyser les commandes</button>
+
+      <div class="progress" id="progress" hidden>
+        <div class="track"><div class="fill" id="fill"></div></div>
+        <div class="pstatus" id="pstatus"></div>
+      </div>
+
+      <div id="messages"></div>
+      <div id="results"></div>
+
+    </div>
+  </div>
+
+  <div class="colophon"><span>Vestey Foods France — ADV · 01</span><span>ExcelJS — embarqué</span></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $=function(id){return document.getElementById(id);};
+  var dropEl=$("drop"), fileEl=$("file"), runEl=$("run"), progEl=$("progress"),
+      fillEl=$("fill"), statusEl=$("pstatus"), msgEl=$("messages"), resEl=$("results");
+  var selectedFile=null, busy=false, rows=[], filter="all";
+
+  function fmtSize(b){ if(b<1024)return b+" o"; if(b<1048576)return (b/1024).toFixed(0)+" Ko"; return (b/1048576).toFixed(1)+" Mo"; }
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function clearMessages(){ msgEl.innerHTML=""; }
+  function showMessage(k,h){ var d=document.createElement("div"); d.className="notice "+k; d.innerHTML=h; msgEl.appendChild(d); }
+  function setProgress(p,t){ progEl.hidden=false; fillEl.style.width=Math.max(0,Math.min(100,p))+"%"; statusEl.textContent=t; }
+
+  function setFile(f){
+    if(!f) return;
+    if(!/\.(xlsx|csv)$/i.test(f.name)){ clearMessages(); showMessage("err","Format non pris en charge (.xlsx ou .csv attendu)."); return; }
+    selectedFile=f; resEl.innerHTML=""; progEl.hidden=true; clearMessages();
+    dropEl.classList.add("has");
+    dropEl.innerHTML='<div class="drop-icon">✅</div><div class="filemeta"><span class="name">'+esc(f.name)+'</span> <span class="size">· '+fmtSize(f.size)+'</span></div><button class="link-btn" id="clr" type="button">Choisir un autre fichier</button>';
+    $("clr").addEventListener("click",function(e){ e.stopPropagation(); reset(); });
+    runEl.disabled=false;
+  }
+  function reset(){
+    selectedFile=null; fileEl.value=""; runEl.disabled=true; progEl.hidden=true; resEl.innerHTML=""; clearMessages();
+    dropEl.classList.remove("has");
+    dropEl.innerHTML='<div class="drop-icon">📦</div><div class="drop-title">Glissez l\'export des commandes</div><div class="drop-hint">.xlsx ou .csv — colonnes attendues : commande, client, statut, date de chargement…</div>';
+  }
+  dropEl.addEventListener("click",function(){ if(!busy) fileEl.click(); });
+  dropEl.addEventListener("keydown",function(e){ if((e.key==="Enter"||e.key===" ")&&!busy){ e.preventDefault(); fileEl.click(); } });
+  fileEl.addEventListener("change",function(e){ setFile(e.target.files[0]); });
+  ["dragenter","dragover"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); if(!busy) dropEl.classList.add("over"); }); });
+  ["dragleave","drop"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); dropEl.classList.remove("over"); }); });
+  dropEl.addEventListener("drop",function(e){ if(busy) return; var f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) setFile(f); });
+
+  // ---------- lecture fichier ----------
+  function detectDelim(l){ var c=(l.match(/,/g)||[]).length,s=(l.match(/;/g)||[]).length; return s>c?";":","; }
+  function parseCSV(text){
+    text=text.replace(/^\uFEFF/,""); var nl=text.indexOf("\n"); var d=detectDelim(text.slice(0,nl>=0?nl:text.length));
+    var rows=[],row=[],f="",q=false;
+    for(var i=0;i<text.length;i++){ var ch=text[i];
+      if(q){ if(ch==='"'){ if(text[i+1]==='"'){f+='"';i++;} else q=false; } else f+=ch; }
+      else { if(ch==='"')q=true; else if(ch===d){row.push(f);f="";} else if(ch==="\n"){row.push(f);rows.push(row);row=[];f="";} else if(ch!=="\r")f+=ch; }
+    }
+    if(f!==""||row.length){row.push(f);rows.push(row);}
+    return rows;
+  }
+  async function loadSheet(file){
+    var wb=new ExcelJS.Workbook();
+    if(/\.csv$/i.test(file.name)){
+      var rs=parseCSV(await file.text()).filter(function(r){return r.length;});
+      var ws=wb.addWorksheet("F1"); rs.forEach(function(r){ ws.addRow(r); }); return ws;
+    }
+    await wb.xlsx.load(await file.arrayBuffer());
+    var s=wb.worksheets[0]; if(!s) throw new Error("aucune feuille trouvée"); return s;
+  }
+
+  // ---------- utilitaires ----------
+  function norm(s){ return String(s==null?"":s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+  function findCol(headers, keys){
+    for(var i=0;i<headers.length;i++){
+      var h=norm(headers[i]);
+      for(var k=0;k<keys.length;k++){ if(h.indexOf(keys[k])>=0) return i+1; }
+    }
+    return 0;
+  }
+  function toDate(v){
+    if(v instanceof Date) return v;
+    if(typeof v==="number"){ return new Date(Date.UTC(1899,11,30+v)); } // série Excel
+    var s=String(v==null?"":v).trim(); if(!s) return null;
+    var m=s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+    if(m){ var y=parseInt(m[3],10); if(y<100)y+=2000; return new Date(y, parseInt(m[2],10)-1, parseInt(m[1],10)); }
+    var d=new Date(s); return isNaN(d.getTime())?null:d;
+  }
+  function daysBetween(a,b){ return Math.round((a-b)/86400000); }
+  function fmtDate(d){ return d? String(d.getDate()).padStart(2,"0")+"/"+String(d.getMonth()+1).padStart(2,"0")+"/"+d.getFullYear() : "—"; }
+
+  var SENT=["expedi","sortie","livre","cloture","clos","shipped","parti"];
+  function isSent(statut){ var s=norm(statut); return SENT.some(function(k){ return s.indexOf(k)>=0; }); }
+
+  // ---------- analyse ----------
+  runEl.addEventListener("click", async function(){
+    if(!selectedFile||busy) return;
+    busy=true; runEl.disabled=true; runEl.textContent="Analyse…"; clearMessages(); resEl.innerHTML="";
+    try{
+      setProgress(20,"Lecture du fichier…");
+      var ws=await loadSheet(selectedFile);
+      var headers=[]; ws.getRow(1).eachCell({includeEmpty:true},function(c){ headers.push(c.value); });
+
+      var cCmd=findCol(headers,["commande","n° cmd","num","order"]);
+      var cCli=findCol(headers,["client","destinataire","customer"]);
+      var cSta=findCol(headers,["statut","status","etat"]);
+      var cDate=findCol(headers,["chargement","charg","depart","expedition","loading"]);
+      var cQte=findCol(headers,["quantite","qte","cartons","colis","palette"]);
+      var cVal=findCol(headers,["montant","valeur","total","ca "]);
+
+      if(!cSta||!cDate) throw new Error("colonnes « statut » et « date de chargement » introuvables dans l'en-tête");
+
+      setProgress(55,"Analyse des commandes…");
+      var today=new Date(); today.setHours(0,0,0,0);
+      rows=[];
+      for(var r=2;r<=ws.actualRowCount;r++){
+        var row=ws.getRow(r);
+        var statut=row.getCell(cSta).value;
+        if(statut==null||String(statut).trim()==="") continue;
+        if(isSent(statut)) continue;                       // déjà sortie
+        var d=toDate(row.getCell(cDate).value);
+        var delta=d? daysBetween(today,d) : null;          // >0 = retard
+        var lvl = delta==null ? "unknown" : (delta>3?"crit": delta>0?"warn": delta>=-2?"soon":"ok");
+        rows.push({
+          cmd: cCmd?row.getCell(cCmd).value:("ligne "+r),
+          cli: cCli?row.getCell(cCli).value:"—",
+          statut: statut,
+          date: d, delta: delta, lvl: lvl,
+          qte: cQte?row.getCell(cQte).value:null,
+          val: cVal?row.getCell(cVal).value:null
+        });
+      }
+      rows.sort(function(a,b){ return (b.delta==null?-999:b.delta)-(a.delta==null?-999:a.delta); });
+
+      setProgress(100,"Terminé — "+rows.length+" commandes non sorties.");
+      render();
+      try{fetch("/.netlify/functions/track",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool:"commandes-non-sorties"})}).catch(function(){});}catch(e){}
+    }catch(err){
+      progEl.hidden=true;
+      showMessage("err","Impossible d'analyser : "+esc(err.message||String(err))+".");
+    }finally{
+      busy=false; runEl.textContent="Analyser les commandes"; runEl.disabled=!selectedFile;
+    }
+  });
+
+  function counts(){
+    var c={crit:0,warn:0,soon:0,ok:0,unknown:0};
+    rows.forEach(function(r){ c[r.lvl]++; });
+    return c;
+  }
+
+  function render(){
+    var c=counts();
+    var visible=rows.filter(function(r){ return filter==="all"?true:r.lvl===filter; });
+    var html='';
+    html+='<div class="kpis">'+
+      '<div class="kpi crit"><div class="l">Retard &gt; 3 j</div><div class="v">'+c.crit+'</div></div>'+
+      '<div class="kpi warn"><div class="l">En retard</div><div class="v">'+c.warn+'</div></div>'+
+      '<div class="kpi soon"><div class="l">Sous 48 h</div><div class="v">'+c.soon+'</div></div>'+
+      '<div class="kpi ok"><div class="l">À venir</div><div class="v">'+c.ok+'</div></div>'+
+    '</div>';
+
+    html+='<div class="filters">'+
+      btn("all","Toutes ("+rows.length+")")+btn("crit","Critiques")+btn("warn","En retard")+btn("soon","Sous 48 h")+btn("ok","À venir")+
+      '<button class="fbtn exp" id="exp">⬇ Exporter la liste (.xlsx)</button></div>';
+
+    html+='<div class="results"><table class="tbl"><thead><tr>'+
+      '<th>Commande</th><th>Client</th><th>Statut</th><th>Chargement</th><th>Écart</th><th>Priorité</th>'+
+      '</tr></thead><tbody>';
+    if(!visible.length){ html+='<tr><td colspan="6" style="color:var(--slate)">Aucune commande dans cette catégorie.</td></tr>'; }
+    visible.forEach(function(r){
+      var lab={crit:'<span class="badge b-crit">Critique</span>',warn:'<span class="badge b-warn">En retard</span>',
+               soon:'<span class="badge b-soon">Imminent</span>',ok:'<span class="badge b-ok">À venir</span>',
+               unknown:'<span class="badge b-warn">Date illisible</span>'}[r.lvl];
+      var ecart = r.delta==null ? "—" : (r.delta>0 ? "+"+r.delta+" j" : (r.delta===0?"aujourd'hui":r.delta+" j"));
+      html+='<tr><td class="fname">'+esc(r.cmd)+'</td><td>'+esc(r.cli)+'</td><td>'+esc(r.statut)+'</td><td>'+fmtDate(r.date)+
+            '</td><td'+(r.delta>0?' class="late"':'')+'>'+ecart+'</td><td>'+lab+'</td></tr>';
+    });
+    html+='</tbody></table></div>';
+    resEl.innerHTML=html;
+
+    ["all","crit","warn","soon","ok"].forEach(function(k){
+      var b=document.getElementById("f-"+k); if(b) b.addEventListener("click",function(){ filter=k; render(); });
+    });
+    var e=document.getElementById("exp"); if(e) e.addEventListener("click", exportXlsx);
+  }
+  function btn(k,label){ return '<button class="fbtn'+(filter===k?" on":"")+'" id="f-'+k+'">'+label+'</button>'; }
+
+  async function exportXlsx(){
+    var wb=new ExcelJS.Workbook(); var ws=wb.addWorksheet("Non sorties");
+    ws.addRow(["Commande","Client","Statut","Date de chargement","Écart (jours)","Priorité"]);
+    ws.getRow(1).eachCell(function(c){ c.font={bold:true,color:{argb:"FFFFFFFF"}}; c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF143F2B"}}; });
+    var labels={crit:"Critique",warn:"En retard",soon:"Imminent",ok:"À venir",unknown:"Date illisible"};
+    rows.forEach(function(r){ ws.addRow([r.cmd,r.cli,r.statut,fmtDate(r.date),r.delta==null?"":r.delta,labels[r.lvl]]); });
+    for(var i=1;i<=6;i++){ var col=ws.getColumn(i),m=10; col.eachCell(function(c){var l=String(c.value==null?"":c.value).length; if(l>m)m=l;}); col.width=Math.min(m+2,45); }
+    ws.views=[{state:"frozen",ySplit:1}];
+    var buf=await wb.xlsx.writeBuffer();
+    var blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="commandes-non-sorties.xlsx"; a.click();
+  }
+})();
+</script>
+</body>
+</html>
