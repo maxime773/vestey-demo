@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<!-- OUTIL
+     titre: Contrôle de la facturation Conhexa
+     description: Extrait les lignes d'une facture prestataire et les confronte au barème contractuel pour isoler les écarts de tarif.
+     categorie: ADV
+     ia: oui
+-->
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Contrôle de la facturation Conhexa — Vestey Foods</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="pdf.min.js"></script>
+<script src="exceljs.min.js"></script>
+<script src="feedback.js"></script>
+<style>
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:22px}
+  .kpi{border:1px solid var(--line-2);border-radius:var(--radius);padding:14px 16px;background:#fff}
+  .kpi.bad{border-left:4px solid #B3261E}
+  .kpi.warn{border-left:4px solid #B8860B}
+  .kpi.ok{border-left:4px solid var(--ok)}
+  .kpi.tot{border-left:4px solid var(--steel)}
+  .kpi .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate)}
+  .kpi .v{font-size:1.55rem;font-weight:800;margin-top:4px;line-height:1}
+  @media(max-width:700px){.kpis{grid-template-columns:1fr 1fr}}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
+  .b-bad{color:#B3261E;background:#FBE9E7}
+  .b-warn{color:#8A6412;background:#FBF3E2}
+  .b-ok{color:var(--ok);background:var(--ok-soft)}
+  td.over{color:#B3261E;font-weight:700}
+  td.under{color:var(--ok);font-weight:700}
+  .bareme{margin-top:20px;background:#fff;border:1px solid var(--line-2);border-radius:var(--radius);padding:16px 18px}
+  .bareme h4{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate);margin-bottom:10px}
+  .brow{display:grid;grid-template-columns:1fr 90px 70px;gap:10px;align-items:center;margin-bottom:8px}
+  .brow input{padding:7px 9px;border:1px solid var(--line-2);border-radius:4px;font-family:var(--mono);font-size:12px}
+  .brow input[type=number]{text-align:right}
+  .brow .u{font-family:var(--mono);font-size:11px;color:var(--slate)}
+  .ai-note{font-family:var(--mono);font-size:11.5px;color:var(--slate);margin-top:16px;display:flex;align-items:center;gap:8px}
+  .ai-note .d{width:7px;height:7px;border-radius:50%;background:var(--signal);flex:none}
+  .exp{margin-top:16px;display:inline-flex;align-items:center;gap:9px;background:var(--ok);color:#fff;font-weight:600;font-size:.92rem;padding:11px 16px;border-radius:var(--radius);border:none;cursor:pointer}
+  .recap{margin-top:18px;background:var(--signal-soft);border:1px solid #E8D8B4;border-radius:var(--radius);padding:14px 16px;font-size:.92rem}
+  .recap b{color:var(--steel)}
+</style>
+</head>
+<body>
+<div class="wrap tool-page">
+  <a class="back" href="index.html">← Catalogue</a>
+
+  <section class="tool-hero">
+    <span class="eyebrow">ADV · 03</span>
+    <h1>Contrôle de la facturation Conhexa</h1>
+    <p>Déposez la facture du prestataire : l'IA en extrait les lignes, puis l'outil les confronte au barème contractuel et isole chaque écart de tarif, avec l'impact en euros.</p>
+  </section>
+
+  <div class="panel">
+    <div class="panel-strip"><span class="k">TRAITEMENT</span> lecture locale · extraction par l'IA · comparaison au barème</div>
+    <div class="panel-body">
+
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Déposer la facture">
+        <div class="drop-icon">🧾</div>
+        <div class="drop-title">Glissez la facture (PDF)</div>
+        <div class="drop-hint">facture d'entreposage, manutention ou transport</div>
+        <input type="file" id="file" accept="application/pdf,.pdf" hidden />
+      </div>
+
+      <div class="bareme">
+        <h4>Barème contractuel de référence — ajustable</h4>
+        <div id="brows"></div>
+        <div class="hintline" style="font-family:var(--mono);font-size:11px;color:var(--slate);margin-top:6px">
+          Tolérance acceptée : <input type="number" id="tol" value="2" min="0" step="1" style="width:52px;padding:4px 6px;border:1px solid var(--line-2);border-radius:4px;text-align:right;font-family:var(--mono)"> %
+        </div>
+      </div>
+
+      <button class="run" id="run" disabled>Contrôler la facture</button>
+
+      <div class="progress" id="progress" hidden>
+        <div class="track"><div class="fill" id="fill"></div></div>
+        <div class="pstatus" id="pstatus"></div>
+      </div>
+
+      <div id="messages"></div>
+      <div id="results"></div>
+
+      <div class="ai-note"><span class="d"></span> L'extraction utilise un modèle d'IA ; les calculs d'écart sont faits localement et vérifiables. Aucun fichier n'est transmis, seulement le texte.</div>
+
+    </div>
+  </div>
+
+  <div class="colophon"><span>Vestey Foods France — ADV · 03</span><span>pdf.js · ExcelJS — embarqués</span></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  pdfjsLib.GlobalWorkerOptions.workerSrc="pdf.worker.min.js";
+  var $=function(id){return document.getElementById(id);};
+  var dropEl=$("drop"), fileEl=$("file"), runEl=$("run"), progEl=$("progress"),
+      fillEl=$("fill"), statusEl=$("pstatus"), msgEl=$("messages"), resEl=$("results"), browsEl=$("brows");
+  var selectedFile=null, busy=false, rows=[], entete=null;
+
+  // barème contractuel par défaut (modifiable dans l'interface)
+  var BAREME=[
+    {k:"palette",  label:"Entreposage palette / mois", pu:12.50, unite:"€/pal/mois"},
+    {k:"manut",    label:"Manutention entrée/sortie",  pu:3.80,  unite:"€/pal"},
+    {k:"picking",  label:"Picking colis",              pu:0.45,  unite:"€/colis"},
+    {k:"surgele",  label:"Supplément surgelé -18°C",   pu:2.10,  unite:"€/pal"},
+    {k:"admin",    label:"Frais de dossier",           pu:25.00, unite:"€/dossier"}
+  ];
+  function renderBareme(){
+    browsEl.innerHTML=BAREME.map(function(b,i){
+      return '<div class="brow"><input type="text" id="bl-'+i+'" value="'+b.label+'">'+
+             '<input type="number" id="bp-'+i+'" value="'+b.pu+'" step="0.01" min="0">'+
+             '<span class="u">'+b.unite+'</span></div>';
+    }).join("");
+  }
+  renderBareme();
+  function readBareme(){
+    return BAREME.map(function(b,i){
+      var l=$("bl-"+i), p=$("bp-"+i);
+      return {k:b.k, label:l?l.value:b.label, pu:p?parseFloat(p.value)||0:b.pu, unite:b.unite};
+    });
+  }
+
+  function fmtSize(b){ if(b<1024)return b+" o"; if(b<1048576)return (b/1024).toFixed(0)+" Ko"; return (b/1048576).toFixed(1)+" Mo"; }
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function fmtE(v){ return (Math.round(v*100)/100).toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})+" €"; }
+  function clearMessages(){ msgEl.innerHTML=""; }
+  function showMessage(k,h){ var d=document.createElement("div"); d.className="notice "+k; d.innerHTML=h; msgEl.appendChild(d); }
+  function setProgress(p,t){ progEl.hidden=false; fillEl.style.width=Math.max(0,Math.min(100,p))+"%"; statusEl.textContent=t; }
+
+  function setFile(f){
+    if(!f) return;
+    if(f.type!=="application/pdf" && !/\.pdf$/i.test(f.name)){ clearMessages(); showMessage("err","Ce fichier n'est pas un PDF."); return; }
+    selectedFile=f; resEl.innerHTML=""; progEl.hidden=true; clearMessages();
+    dropEl.classList.add("has");
+    dropEl.innerHTML='<div class="drop-icon">✅</div><div class="filemeta"><span class="name">'+esc(f.name)+'</span> <span class="size">· '+fmtSize(f.size)+'</span></div><button class="link-btn" id="clr" type="button">Choisir un autre fichier</button>';
+    $("clr").addEventListener("click",function(e){ e.stopPropagation(); reset(); });
+    runEl.disabled=false;
+  }
+  function reset(){
+    selectedFile=null; fileEl.value=""; runEl.disabled=true; progEl.hidden=true; resEl.innerHTML=""; clearMessages();
+    dropEl.classList.remove("has");
+    dropEl.innerHTML='<div class="drop-icon">🧾</div><div class="drop-title">Glissez la facture (PDF)</div><div class="drop-hint">facture d\'entreposage, manutention ou transport</div>';
+  }
+  dropEl.addEventListener("click",function(){ if(!busy) fileEl.click(); });
+  dropEl.addEventListener("keydown",function(e){ if((e.key==="Enter"||e.key===" ")&&!busy){ e.preventDefault(); fileEl.click(); } });
+  fileEl.addEventListener("change",function(e){ setFile(e.target.files[0]); });
+  ["dragenter","dragover"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); if(!busy) dropEl.classList.add("over"); }); });
+  ["dragleave","drop"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); dropEl.classList.remove("over"); }); });
+  dropEl.addEventListener("drop",function(e){ if(busy) return; var f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) setFile(f); });
+
+  function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase(); }
+  function matchBareme(libelle, bareme){
+    var l=norm(libelle);
+    var rules={
+      palette:["entreposage","stockage","palette/mois","location palette"],
+      manut:["manutention","entree/sortie","entrée/sortie","handling","chargement"],
+      picking:["picking","preparation","colis","prelevement"],
+      surgele:["surgele","-18","froid negatif","congele"],
+      admin:["dossier","administratif","gestion","frais fixe"]
+    };
+    for(var i=0;i<bareme.length;i++){
+      var keys=rules[bareme[i].k]||[];
+      for(var j=0;j<keys.length;j++){ if(l.indexOf(norm(keys[j]))>=0) return bareme[i]; }
+    }
+    return null;
+  }
+
+  runEl.addEventListener("click", async function(){
+    if(!selectedFile||busy) return;
+    busy=true; runEl.disabled=true; runEl.textContent="Analyse…"; clearMessages(); resEl.innerHTML="";
+    try{
+      setProgress(15,"Lecture de la facture…");
+      var pdf=await pdfjsLib.getDocument({data:new Uint8Array(await selectedFile.arrayBuffer())}).promise;
+      var text="";
+      for(var p=1;p<=pdf.numPages;p++){
+        var pg=await pdf.getPage(p); var tc=await pg.getTextContent();
+        text+=tc.items.map(function(it){return it.str;}).join(" ")+"\n";
+        setProgress(15+(p/pdf.numPages)*25,"Lecture page "+p+"/"+pdf.numPages+"…");
+      }
+      if(!text.trim()) throw new Error("aucun texte extrait — facture scannée ?");
+
+      setProgress(55,"Extraction des lignes par l'IA…");
+      var resp=await fetch("/.netlify/functions/facture-conhexa",{
+        method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text:text})
+      });
+      var data=await resp.json();
+      if(!resp.ok || data.error) throw new Error((data&&data.error)||("erreur "+resp.status));
+
+      setProgress(85,"Comparaison au barème…");
+      var bareme=readBareme();
+      var tol=(parseFloat($("tol").value)||0)/100;
+      entete={fournisseur:data.fournisseur||"—", numero:data.numero||"—", periode:data.periode||"—", total:data.total_ht};
+
+      rows=(data.lignes||[]).map(function(l){
+        var ref=matchBareme(l.libelle,bareme);
+        var pu=(typeof l.prix_unitaire==="number")?l.prix_unitaire:null;
+        var qte=(typeof l.quantite==="number")?l.quantite:null;
+        var mont=(typeof l.montant==="number")?l.montant:((pu!=null&&qte!=null)?pu*qte:null);
+        var r={libelle:l.libelle||"—", qte:qte, unite:l.unite||"", pu:pu, mont:mont,
+               ref:ref?ref.pu:null, refLabel:ref?ref.label:null, ecart:null, impact:null, lvl:"unknown"};
+        if(ref && pu!=null){
+          r.ecart=pu-ref.pu;
+          r.impact=(qte!=null)?r.ecart*qte:null;
+          var rel=ref.pu?Math.abs(r.ecart)/ref.pu:0;
+          r.lvl = rel<=tol ? "ok" : (r.ecart>0 ? "bad" : "under");
+        } else if(!ref){ r.lvl="unknown"; }
+        return r;
+      });
+      rows.sort(function(a,b){ return (b.impact||0)-(a.impact||0); });
+
+      setProgress(100,"Terminé — "+rows.length+" ligne(s) analysée(s).");
+      render();
+      try{fetch("/.netlify/functions/track",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool:"facture-conhexa"})}).catch(function(){});}catch(e){}
+    }catch(err){
+      progEl.hidden=true;
+      showMessage("err","Analyse impossible : "+esc(err.message||String(err))+".");
+    }finally{
+      busy=false; runEl.textContent="Contrôler la facture"; runEl.disabled=!selectedFile;
+    }
+  });
+
+  function render(){
+    var c={bad:0,under:0,ok:0,unknown:0}; var impact=0, total=0;
+    rows.forEach(function(r){ c[r.lvl]++; if(r.impact) impact+=r.impact; if(r.mont) total+=r.mont; });
+
+    var html='';
+    if(entete){
+      html+='<div class="recap">Facture <b>'+esc(entete.numero)+'</b> — '+esc(entete.fournisseur)+
+            ' · période '+esc(entete.periode)+' · total facturé <b>'+fmtE(entete.total||total)+'</b></div>';
+    }
+    html+='<div class="kpis">'+
+      '<div class="kpi bad"><div class="l">Surfacturations</div><div class="v">'+c.bad+'</div></div>'+
+      '<div class="kpi ok"><div class="l">Conformes</div><div class="v">'+c.ok+'</div></div>'+
+      '<div class="kpi warn"><div class="l">Hors barème</div><div class="v">'+c.unknown+'</div></div>'+
+      '<div class="kpi tot"><div class="l">Impact estimé</div><div class="v">'+(impact>0?"+":"")+fmtE(impact)+'</div></div>'+
+    '</div>';
+
+    html+='<div class="results"><table class="tbl"><thead><tr>'+
+      '<th>Ligne facturée</th><th>Qté</th><th>P.U. facturé</th><th>P.U. barème</th><th>Écart</th><th>Impact</th><th>Constat</th>'+
+      '</tr></thead><tbody>';
+    rows.forEach(function(r){
+      var lab={bad:'<span class="badge b-bad">Surfacturé</span>',under:'<span class="badge b-ok">Sous barème</span>',
+               ok:'<span class="badge b-ok">Conforme</span>',unknown:'<span class="badge b-warn">Hors barème</span>'}[r.lvl];
+      var cls=r.ecart==null?"":(r.ecart>0?"over":(r.ecart<0?"under":""));
+      html+='<tr><td>'+esc(r.libelle)+'</td>'+
+            '<td>'+(r.qte==null?"—":r.qte)+'</td>'+
+            '<td>'+(r.pu==null?"—":fmtE(r.pu))+'</td>'+
+            '<td>'+(r.ref==null?"—":fmtE(r.ref))+'</td>'+
+            '<td class="'+cls+'">'+(r.ecart==null?"—":((r.ecart>0?"+":"")+fmtE(r.ecart)))+'</td>'+
+            '<td class="'+cls+'">'+(r.impact==null?"—":((r.impact>0?"+":"")+fmtE(r.impact)))+'</td>'+
+            '<td>'+lab+'</td></tr>';
+    });
+    html+='</tbody></table><button class="exp" id="exp">⬇ Exporter le contrôle (.xlsx)</button></div>';
+    resEl.innerHTML=html;
+    $("exp").addEventListener("click", exportXlsx);
+
+    if(c.bad) showMessage("warn","<strong>"+c.bad+"</strong> ligne(s) au-dessus du barème contractuel — impact estimé <strong>"+fmtE(impact)+"</strong>. À confronter au contrat avant règlement.");
+    if(c.unknown) showMessage("warn","<strong>"+c.unknown+"</strong> ligne(s) sans correspondance dans le barème — à qualifier manuellement.");
+  }
+
+  async function exportXlsx(){
+    var wb=new ExcelJS.Workbook(); var ws=wb.addWorksheet("Contrôle facture");
+    ws.addRow(["Ligne facturée","Quantité","P.U. facturé","P.U. barème","Écart unitaire","Impact","Constat"]);
+    ws.getRow(1).eachCell(function(c){ c.font={bold:true,color:{argb:"FFFFFFFF"}}; c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF143F2B"}}; });
+    var labels={bad:"Surfacturé",under:"Sous barème",ok:"Conforme",unknown:"Hors barème"};
+    rows.forEach(function(r){ ws.addRow([r.libelle,r.qte,r.pu,r.ref,r.ecart,r.impact,labels[r.lvl]]); });
+    for(var i=1;i<=7;i++){ var col=ws.getColumn(i),m=12; col.eachCell(function(c){var l=String(c.value==null?"":c.value).length; if(l>m)m=l;}); col.width=Math.min(m+2,45); }
+    ws.views=[{state:"frozen",ySplit:1}];
+    var buf=await wb.xlsx.writeBuffer();
+    var blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="controle-facture-conhexa.xlsx"; a.click();
+  }
+})();
+</script>
+</body>
+</html>
