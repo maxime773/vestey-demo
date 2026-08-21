@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<!-- OUTIL
+     titre: Cartographie des flux achats / ventes
+     description: Transforme un export de transactions en vue d'ensemble : volumes et montants par pays, fournisseur, catégorie et mois.
+     categorie: LOG
+     ia: non
+-->
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cartographie des flux — Vestey Foods</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="exceljs.min.js"></script>
+<script src="chart.min.js"></script>
+<script src="feedback.js"></script>
+<style>
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:22px}
+  .kpi{border:1px solid var(--line-2);border-radius:var(--radius);padding:14px 16px;background:#fff;border-left:4px solid var(--steel)}
+  .kpi .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate)}
+  .kpi .v{font-size:1.55rem;font-weight:800;margin-top:4px;line-height:1}
+  @media(max-width:700px){.kpis{grid-template-columns:1fr 1fr}}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px}
+  .chartcard{background:#fff;border:1px solid var(--line-2);border-radius:var(--radius);padding:16px}
+  .chartcard h4{font-size:.95rem;margin-bottom:10px}
+  .chartcard .cwrap{position:relative;height:250px}
+  @media(max-width:640px){.charts{grid-template-columns:1fr}}
+  .toggle{display:flex;gap:8px;margin-top:20px;flex-wrap:wrap;align-items:center}
+  .tbtn{font-family:var(--mono);font-size:11.5px;padding:7px 12px;border:1px solid var(--line-2);background:#fff;border-radius:999px;cursor:pointer;color:var(--slate)}
+  .tbtn.on{background:var(--steel);color:var(--paper);border-color:var(--steel)}
+  .tlabel{font-family:var(--mono);font-size:11.5px;color:var(--slate);margin-right:4px}
+</style>
+</head>
+<body>
+<div class="wrap tool-page">
+  <a class="back" href="index.html">← Catalogue</a>
+
+  <section class="tool-hero">
+    <span class="eyebrow">LOG · 01</span>
+    <h1>Cartographie des flux achats / ventes</h1>
+    <p>Déposez l'export des transactions : l'outil reconstitue la vue d'ensemble — répartition par pays, par fournisseur, par catégorie et évolution mensuelle, en volume comme en valeur.</p>
+  </section>
+
+  <div class="panel">
+    <div class="panel-strip"><span class="k">TRAITEMENT</span> local · aucun envoi réseau · .xlsx / .csv</div>
+    <div class="panel-body">
+
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Déposer l'export des transactions">
+        <div class="drop-icon">🗺️</div>
+        <div class="drop-title">Glissez l'export des transactions</div>
+        <div class="drop-hint">.xlsx ou .csv — sens (achat/vente), pays, fournisseur, catégorie, montant…</div>
+        <input type="file" id="file" accept=".xlsx,.csv" hidden />
+      </div>
+
+      <button class="run" id="run" disabled>Cartographier les flux</button>
+
+      <div class="progress" id="progress" hidden>
+        <div class="track"><div class="fill" id="fill"></div></div>
+        <div class="pstatus" id="pstatus"></div>
+      </div>
+
+      <div id="messages"></div>
+      <div id="results"></div>
+
+    </div>
+  </div>
+
+  <div class="colophon"><span>Vestey Foods France — LOG · 01</span><span>ExcelJS · Chart.js — embarqués</span></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $=function(id){return document.getElementById(id);};
+  var dropEl=$("drop"), fileEl=$("file"), runEl=$("run"), progEl=$("progress"),
+      fillEl=$("fill"), statusEl=$("pstatus"), msgEl=$("messages"), resEl=$("results");
+  var selectedFile=null, busy=false, data=[], charts=[], mode="ventes";
+  var PALETTE=["#143F2B","#A9812F","#3D7A5A","#C9A24B","#6BA98A","#8A6412","#B5C9BD","#E3C879"];
+  var MOIS=["Jan","Fév","Mar","Avr","Mai","Juin","Juil","Août","Sep","Oct","Nov","Déc"];
+
+  function fmtSize(b){ if(b<1024)return b+" o"; if(b<1048576)return (b/1024).toFixed(0)+" Ko"; return (b/1048576).toFixed(1)+" Mo"; }
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function fmtE(v){ return Math.round(v).toLocaleString("fr-FR")+" €"; }
+  function clearMessages(){ msgEl.innerHTML=""; }
+  function showMessage(k,h){ var d=document.createElement("div"); d.className="notice "+k; d.innerHTML=h; msgEl.appendChild(d); }
+  function setProgress(p,t){ progEl.hidden=false; fillEl.style.width=Math.max(0,Math.min(100,p))+"%"; statusEl.textContent=t; }
+  function clearCharts(){ charts.forEach(function(c){try{c.destroy();}catch(e){}}); charts=[]; }
+
+  function setFile(f){
+    if(!f) return;
+    if(!/\.(xlsx|csv)$/i.test(f.name)){ clearMessages(); showMessage("err","Format non pris en charge (.xlsx ou .csv)."); return; }
+    selectedFile=f; resEl.innerHTML=""; progEl.hidden=true; clearMessages(); clearCharts();
+    dropEl.classList.add("has");
+    dropEl.innerHTML='<div class="drop-icon">✅</div><div class="filemeta"><span class="name">'+esc(f.name)+'</span> <span class="size">· '+fmtSize(f.size)+'</span></div><button class="link-btn" id="clr" type="button">Choisir un autre fichier</button>';
+    $("clr").addEventListener("click",function(e){ e.stopPropagation(); reset(); });
+    runEl.disabled=false;
+  }
+  function reset(){
+    selectedFile=null; fileEl.value=""; runEl.disabled=true; progEl.hidden=true; resEl.innerHTML=""; clearMessages(); clearCharts();
+    dropEl.classList.remove("has");
+    dropEl.innerHTML='<div class="drop-icon">🗺️</div><div class="drop-title">Glissez l\'export des transactions</div><div class="drop-hint">.xlsx ou .csv — sens (achat/vente), pays, fournisseur, catégorie, montant…</div>';
+  }
+  dropEl.addEventListener("click",function(){ if(!busy) fileEl.click(); });
+  dropEl.addEventListener("keydown",function(e){ if((e.key==="Enter"||e.key===" ")&&!busy){ e.preventDefault(); fileEl.click(); } });
+  fileEl.addEventListener("change",function(e){ setFile(e.target.files[0]); });
+  ["dragenter","dragover"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); if(!busy) dropEl.classList.add("over"); }); });
+  ["dragleave","drop"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); dropEl.classList.remove("over"); }); });
+  dropEl.addEventListener("drop",function(e){ if(busy) return; var f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) setFile(f); });
+
+  function detectDelim(l){ var c=(l.match(/,/g)||[]).length,s=(l.match(/;/g)||[]).length; return s>c?";":","; }
+  function parseCSV(text){
+    text=text.replace(/^\uFEFF/,""); var nl=text.indexOf("\n"); var d=detectDelim(text.slice(0,nl>=0?nl:text.length));
+    var rs=[],row=[],f="",q=false;
+    for(var i=0;i<text.length;i++){ var ch=text[i];
+      if(q){ if(ch==='"'){ if(text[i+1]==='"'){f+='"';i++;} else q=false; } else f+=ch; }
+      else { if(ch==='"')q=true; else if(ch===d){row.push(f);f="";} else if(ch==="\n"){row.push(f);rs.push(row);row=[];f="";} else if(ch!=="\r")f+=ch; }
+    }
+    if(f!==""||row.length){row.push(f);rs.push(row);}
+    return rs;
+  }
+  async function loadSheet(file){
+    var wb=new ExcelJS.Workbook();
+    if(/\.csv$/i.test(file.name)){
+      var rs=parseCSV(await file.text()).filter(function(r){return r.length;});
+      var ws=wb.addWorksheet("F1"); rs.forEach(function(r){ ws.addRow(r); }); return ws;
+    }
+    await wb.xlsx.load(await file.arrayBuffer());
+    var s=wb.worksheets[0]; if(!s) throw new Error("aucune feuille"); return s;
+  }
+  function norm(s){ return String(s==null?"":s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+  function findCol(h,keys){ for(var i=0;i<h.length;i++){ var x=norm(h[i]); for(var k=0;k<keys.length;k++){ if(x.indexOf(keys[k])>=0) return i+1; } } return 0; }
+  function num(v){ if(v==null||v==="")return null; if(typeof v==="number")return v; var n=parseFloat(String(v).replace(/\s/g,"").replace(",",".")); return isNaN(n)?null:n; }
+  function toDate(v){
+    if(v instanceof Date) return v;
+    if(typeof v==="number") return new Date(Date.UTC(1899,11,30+v));
+    var s=String(v==null?"":v).trim(); if(!s) return null;
+    var m=s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+    if(m){ var y=parseInt(m[3],10); if(y<100)y+=2000; return new Date(y,parseInt(m[2],10)-1,parseInt(m[1],10)); }
+    var d=new Date(s); return isNaN(d.getTime())?null:d;
+  }
+
+  runEl.addEventListener("click", async function(){
+    if(!selectedFile||busy) return;
+    busy=true; runEl.disabled=true; runEl.textContent="Analyse…"; clearMessages(); resEl.innerHTML=""; clearCharts();
+    try{
+      setProgress(25,"Lecture du fichier…");
+      var ws=await loadSheet(selectedFile);
+      var h=[]; ws.getRow(1).eachCell({includeEmpty:true},function(c){ h.push(c.value); });
+      var cSens=findCol(h,["sens","type","flux","nature"]);
+      var cPays=findCol(h,["pays","origine","destination","country"]);
+      var cPart=findCol(h,["fournisseur","client","partenaire","tiers"]);
+      var cCat =findCol(h,["categorie","famille","gamme","produit"]);
+      var cMont=findCol(h,["montant","valeur","total","ca "]);
+      var cQte =findCol(h,["quantite","qte","cartons","volume","poids","tonnage"]);
+      var cDate=findCol(h,["date","periode","mois"]);
+      if(!cMont) throw new Error("colonne « montant » introuvable");
+
+      setProgress(60,"Agrégation des flux…");
+      data=[];
+      for(var r=2;r<=ws.actualRowCount;r++){
+        var row=ws.getRow(r);
+        var mont=num(row.getCell(cMont).value); if(mont==null) continue;
+        var sens=cSens?norm(row.getCell(cSens).value):"";
+        data.push({
+          sens: sens.indexOf("achat")>=0?"achats":(sens.indexOf("vente")>=0?"ventes":"ventes"),
+          pays: cPays?String(row.getCell(cPays).value||"—"):"—",
+          part: cPart?String(row.getCell(cPart).value||"—"):"—",
+          cat:  cCat ?String(row.getCell(cCat).value ||"—"):"—",
+          mont: mont,
+          qte:  cQte?(num(row.getCell(cQte).value)||0):0,
+          date: cDate?toDate(row.getCell(cDate).value):null
+        });
+      }
+      if(!data.length) throw new Error("aucune ligne exploitable");
+
+      setProgress(100,"Terminé — "+data.length+" transactions analysées.");
+      render();
+      try{fetch("/.netlify/functions/track",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool:"cartographie-flux"})}).catch(function(){});}catch(e){}
+    }catch(err){
+      progEl.hidden=true;
+      showMessage("err","Impossible d'analyser : "+esc(err.message||String(err))+".");
+    }finally{
+      busy=false; runEl.textContent="Cartographier les flux"; runEl.disabled=!selectedFile;
+    }
+  });
+
+  function groupBy(rows,key){
+    var m={}; rows.forEach(function(r){ m[r[key]]=(m[r[key]]||0)+r.mont; });
+    return Object.keys(m).map(function(k){return {k:k,v:m[k]};}).sort(function(a,b){return b.v-a.v;});
+  }
+
+  function render(){
+    clearCharts();
+    var rows=data.filter(function(r){ return r.sens===mode; });
+    var total=rows.reduce(function(s,r){return s+r.mont;},0);
+    var qte=rows.reduce(function(s,r){return s+r.qte;},0);
+    var byPays=groupBy(rows,"pays"), byPart=groupBy(rows,"part"), byCat=groupBy(rows,"cat");
+
+    var html='<div class="toggle"><span class="tlabel">Afficher :</span>'+
+      '<button class="tbtn'+(mode==="ventes"?" on":"")+'" id="m-ventes">Ventes</button>'+
+      '<button class="tbtn'+(mode==="achats"?" on":"")+'" id="m-achats">Achats</button></div>';
+
+    html+='<div class="kpis">'+
+      '<div class="kpi"><div class="l">Montant total</div><div class="v">'+fmtE(total)+'</div></div>'+
+      '<div class="kpi"><div class="l">Transactions</div><div class="v">'+rows.length+'</div></div>'+
+      '<div class="kpi"><div class="l">Volume</div><div class="v">'+Math.round(qte).toLocaleString("fr-FR")+'</div></div>'+
+      '<div class="kpi"><div class="l">Pays / partenaires</div><div class="v">'+byPays.length+' / '+byPart.length+'</div></div>'+
+    '</div>';
+
+    html+='<div class="charts">'+
+      card("pays","Répartition par pays")+
+      card("part",mode==="achats"?"Top fournisseurs":"Top clients")+
+      card("cat","Par catégorie de produits")+
+      card("mois","Évolution mensuelle")+
+    '</div>';
+    resEl.innerHTML=html;
+
+    $("m-ventes").addEventListener("click",function(){ mode="ventes"; render(); });
+    $("m-achats").addEventListener("click",function(){ mode="achats"; render(); });
+
+    mkChart("pays","pie",byPays.slice(0,8));
+    mkChart("part","bar",byPart.slice(0,8));
+    mkChart("cat","bar",byCat.slice(0,8));
+
+    // évolution mensuelle
+    var byMonth={};
+    rows.forEach(function(r){ if(r.date){ var k=r.date.getMonth(); byMonth[k]=(byMonth[k]||0)+r.mont; } });
+    var ks=Object.keys(byMonth).map(Number).sort(function(a,b){return a-b;});
+    mkChart("mois","line", ks.map(function(k){ return {k:MOIS[k], v:byMonth[k]}; }));
+  }
+  function card(id,title){
+    return '<div class="chartcard"><h4>'+title+'</h4><div class="cwrap"><canvas id="c-'+id+'"></canvas></div></div>';
+  }
+  function mkChart(id,type,items){
+    var el=$("c-"+id); if(!el||!items.length) return;
+    var labels=items.map(function(i){return i.k;}), values=items.map(function(i){return Math.round(i.v);});
+    var ds={ data:values, label:"€" };
+    if(type==="pie"){ ds.backgroundColor=labels.map(function(_,i){return PALETTE[i%PALETTE.length];}); }
+    else if(type==="line"){ ds.borderColor=PALETTE[0]; ds.backgroundColor="rgba(20,63,43,.12)"; ds.tension=.3; ds.fill=true; }
+    else { ds.backgroundColor=PALETTE[0]; }
+    charts.push(new Chart(el.getContext("2d"),{
+      type:type, data:{labels:labels,datasets:[ds]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:type==="pie",position:"right",labels:{boxWidth:12,font:{size:10}}},
+          tooltip:{callbacks:{label:function(c){ return " "+Math.round(c.parsed.y!=null?c.parsed.y:c.parsed).toLocaleString("fr-FR")+" €"; }}}},
+        scales: type==="pie"?{}:{y:{beginAtZero:true,ticks:{callback:function(v){return (v/1000)+"k€";}}}}}
+    }));
+  }
+})();
+</script>
+</body>
+</html>

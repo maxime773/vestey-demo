@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<!-- OUTIL
+     titre: Vérification des packing lists
+     description: Contrôle qu'un packing list est bien présent dans chaque dossier documentaire déposé, et signale les manquants.
+     categorie: QUAL
+     ia: non
+-->
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Vérification des packing lists — Vestey Foods</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="pdf.min.js"></script>
+<script src="exceljs.min.js"></script>
+<script src="feedback.js"></script>
+<style>
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:22px}
+  .kpi{border:1px solid var(--line-2);border-radius:var(--radius);padding:14px 16px;background:#fff}
+  .kpi.ok{border-left:4px solid var(--ok)}
+  .kpi.bad{border-left:4px solid #B3261E}
+  .kpi.warn{border-left:4px solid #B8860B}
+  .kpi .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate)}
+  .kpi .v{font-size:1.7rem;font-weight:800;margin-top:4px;line-height:1}
+  @media(max-width:640px){.kpis{grid-template-columns:1fr}}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
+  .b-ok{color:var(--ok);background:var(--ok-soft)}
+  .b-bad{color:#B3261E;background:#FBE9E7}
+  .b-warn{color:#8A6412;background:#FBF3E2}
+  .docs{font-family:var(--mono);font-size:11px;color:var(--slate)}
+  .exp{margin-top:16px;display:inline-flex;align-items:center;gap:9px;background:var(--ok);color:#fff;font-weight:600;font-size:.92rem;padding:11px 16px;border-radius:var(--radius);border:none;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap tool-page">
+  <a class="back" href="index.html">← Catalogue</a>
+
+  <section class="tool-hero">
+    <span class="eyebrow">QUAL · 02</span>
+    <h1>Vérification des packing lists</h1>
+    <p>Déposez les PDF reçus pour un ou plusieurs dossiers : l'outil lit chaque document, identifie sa nature (packing list, facture, certificat, CMR…) et signale les dossiers où le packing list manque.</p>
+  </section>
+
+  <div class="panel">
+    <div class="panel-strip"><span class="k">TRAITEMENT</span> local · aucun envoi réseau · lecture du contenu PDF</div>
+    <div class="panel-body">
+
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Déposer les documents PDF">
+        <div class="drop-icon">📑</div>
+        <div class="drop-title">Glissez les documents PDF</div>
+        <div class="drop-hint">plusieurs fichiers à la fois — les dossiers sont regroupés par n° de commande détecté</div>
+        <input type="file" id="file" accept="application/pdf,.pdf" multiple hidden />
+      </div>
+
+      <div id="filelist" class="docs" style="margin-top:12px"></div>
+
+      <button class="run" id="run" disabled>Vérifier les dossiers</button>
+
+      <div class="progress" id="progress" hidden>
+        <div class="track"><div class="fill" id="fill"></div></div>
+        <div class="pstatus" id="pstatus"></div>
+      </div>
+
+      <div id="messages"></div>
+      <div id="results"></div>
+
+    </div>
+  </div>
+
+  <div class="colophon"><span>Vestey Foods France — QUAL · 02</span><span>pdf.js · ExcelJS — embarqués</span></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  pdfjsLib.GlobalWorkerOptions.workerSrc="pdf.worker.min.js";
+  var $=function(id){return document.getElementById(id);};
+  var dropEl=$("drop"), fileEl=$("file"), listEl=$("filelist"), runEl=$("run"),
+      progEl=$("progress"), fillEl=$("fill"), statusEl=$("pstatus"), msgEl=$("messages"), resEl=$("results");
+  var files=[], busy=false, dossiers=[];
+
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function clearMessages(){ msgEl.innerHTML=""; }
+  function showMessage(k,h){ var d=document.createElement("div"); d.className="notice "+k; d.innerHTML=h; msgEl.appendChild(d); }
+  function setProgress(p,t){ progEl.hidden=false; fillEl.style.width=Math.max(0,Math.min(100,p))+"%"; statusEl.textContent=t; }
+
+  function addFiles(fl){
+    clearMessages(); resEl.innerHTML="";
+    Array.prototype.forEach.call(fl||[],function(f){
+      if(f.type!=="application/pdf" && !/\.pdf$/i.test(f.name)){ showMessage("warn","Ignoré (pas un PDF) : <strong>"+esc(f.name)+"</strong>"); return; }
+      files.push(f);
+    });
+    renderList();
+  }
+  function renderList(){
+    if(!files.length){ listEl.innerHTML=""; runEl.disabled=true; return; }
+    listEl.innerHTML=files.length+" document"+(files.length>1?"s":"")+" chargé"+(files.length>1?"s":"")+
+      " · <button class='link-btn' id='clr' type='button'>vider la liste</button>";
+    $("clr").addEventListener("click",function(){ files=[]; dossiers=[]; renderList(); resEl.innerHTML=""; });
+    runEl.disabled=busy;
+    dropEl.classList.add("has");
+    dropEl.innerHTML='<div class="drop-icon">✅</div><div class="drop-title">'+files.length+' document(s) prêt(s)</div><div class="drop-hint">cliquez pour en ajouter d\'autres</div>';
+  }
+  dropEl.addEventListener("click",function(){ if(!busy) fileEl.click(); });
+  dropEl.addEventListener("keydown",function(e){ if((e.key==="Enter"||e.key===" ")&&!busy){ e.preventDefault(); fileEl.click(); } });
+  fileEl.addEventListener("change",function(e){ addFiles(e.target.files); fileEl.value=""; });
+  ["dragenter","dragover"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); if(!busy) dropEl.classList.add("over"); }); });
+  ["dragleave","drop"].forEach(function(ev){ dropEl.addEventListener(ev,function(e){ e.preventDefault(); dropEl.classList.remove("over"); }); });
+  dropEl.addEventListener("drop",function(e){ if(!busy) addFiles(e.dataTransfer.files); });
+
+  // --- typage documentaire par mots-clés ---
+  var TYPES=[
+    {t:"Packing list", keys:["packing list","liste de colisage","colisage","packing-list"]},
+    {t:"Facture",      keys:["facture","invoice","commercial invoice"]},
+    {t:"Certificat sanitaire", keys:["certificat sanitaire","health certificate","veterinaire","vétérinaire"]},
+    {t:"CMR / transport", keys:["cmr","lettre de voiture","bill of lading","connaissement"]},
+    {t:"Bon de livraison", keys:["bon de livraison","delivery note"]}
+  ];
+  function norm(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase(); }
+  function typeOf(text,name){
+    var t=norm(text)+" "+norm(name);
+    for(var i=0;i<TYPES.length;i++){
+      for(var k=0;k<TYPES[i].keys.length;k++){ if(t.indexOf(norm(TYPES[i].keys[k]))>=0) return TYPES[i].t; }
+    }
+    return "Non identifié";
+  }
+  function dossierOf(text,name){
+    var m=(text+" "+name).match(/CMD[-\s]?\d{4,6}/i);
+    if(m) return m[0].toUpperCase().replace(/\s/g,"-");
+    var m2=name.match(/\d{4,6}/); return m2? "Dossier "+m2[0] : "Dossier « "+name.replace(/\.pdf$/i,"")+" »";
+  }
+
+  runEl.addEventListener("click", async function(){
+    if(!files.length||busy) return;
+    busy=true; runEl.disabled=true; runEl.textContent="Lecture…"; clearMessages(); resEl.innerHTML="";
+    try{
+      var docs=[];
+      for(var i=0;i<files.length;i++){
+        setProgress((i/files.length)*88,"Lecture de « "+files[i].name+" »…");
+        var text="";
+        try{
+          var pdf=await pdfjsLib.getDocument({data:new Uint8Array(await files[i].arrayBuffer())}).promise;
+          var max=Math.min(pdf.numPages,3);
+          for(var p=1;p<=max;p++){ var pg=await pdf.getPage(p); var tc=await pg.getTextContent(); text+=tc.items.map(function(it){return it.str;}).join(" ")+" "; }
+        }catch(e){ text=""; }
+        docs.push({name:files[i].name, type:typeOf(text,files[i].name), dossier:dossierOf(text,files[i].name), empty:!text.trim()});
+      }
+      setProgress(95,"Regroupement par dossier…");
+      var map={};
+      docs.forEach(function(d){ (map[d.dossier]=map[d.dossier]||[]).push(d); });
+      dossiers=Object.keys(map).map(function(k){
+        var ds=map[k];
+        var hasPL=ds.some(function(d){ return d.type==="Packing list"; });
+        var unknown=ds.filter(function(d){ return d.type==="Non identifié"; }).length;
+        return {ref:k, docs:ds, lvl: hasPL?"ok":(unknown?"warn":"bad")};
+      }).sort(function(a,b){ var r={bad:0,warn:1,ok:2}; return r[a.lvl]-r[b.lvl]; });
+
+      setProgress(100,"Terminé — "+dossiers.length+" dossier(s) contrôlé(s).");
+      render();
+      try{fetch("/.netlify/functions/track",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool:"packing-list"})}).catch(function(){});}catch(e){}
+    }catch(err){
+      progEl.hidden=true;
+      showMessage("err","Erreur : "+esc(err.message||String(err))+". Testez depuis l'adresse en ligne du site.");
+    }finally{
+      busy=false; runEl.textContent="Vérifier les dossiers"; runEl.disabled=!files.length;
+    }
+  });
+
+  function render(){
+    var c={ok:0,bad:0,warn:0}; dossiers.forEach(function(d){ c[d.lvl]++; });
+    var html='<div class="kpis">'+
+      '<div class="kpi ok"><div class="l">Conformes</div><div class="v">'+c.ok+'</div></div>'+
+      '<div class="kpi bad"><div class="l">Packing list manquant</div><div class="v">'+c.bad+'</div></div>'+
+      '<div class="kpi warn"><div class="l">À vérifier</div><div class="v">'+c.warn+'</div></div>'+
+    '</div>';
+
+    html+='<div class="results"><table class="tbl"><thead><tr><th>Dossier</th><th>Documents présents</th><th>Constat</th></tr></thead><tbody>';
+    dossiers.forEach(function(d){
+      var lab={ok:'<span class="badge b-ok">Complet</span>',bad:'<span class="badge b-bad">Packing list absent</span>',warn:'<span class="badge b-warn">Document non identifié</span>'}[d.lvl];
+      var list=d.docs.map(function(x){ return esc(x.type)+' <span style="opacity:.6">('+esc(x.name)+')</span>'; }).join('<br>');
+      html+='<tr><td class="fname">'+esc(d.ref)+'</td><td class="docs">'+list+'</td><td>'+lab+'</td></tr>';
+    });
+    html+='</tbody></table><button class="exp" id="exp">⬇ Exporter le contrôle (.xlsx)</button></div>';
+    resEl.innerHTML=html;
+    $("exp").addEventListener("click", exportXlsx);
+    if(c.bad) showMessage("warn","<strong>"+c.bad+"</strong> dossier(s) sans packing list — à réclamer au fournisseur avant réception.");
+  }
+
+  async function exportXlsx(){
+    var wb=new ExcelJS.Workbook(); var ws=wb.addWorksheet("Contrôle packing list");
+    ws.addRow(["Dossier","Document","Type identifié","Constat du dossier"]);
+    ws.getRow(1).eachCell(function(c){ c.font={bold:true,color:{argb:"FFFFFFFF"}}; c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF143F2B"}}; });
+    var labels={ok:"Complet",bad:"Packing list absent",warn:"Document non identifié"};
+    dossiers.forEach(function(d){ d.docs.forEach(function(x){ ws.addRow([d.ref,x.name,x.type,labels[d.lvl]]); }); });
+    for(var i=1;i<=4;i++){ var col=ws.getColumn(i),m=12; col.eachCell(function(c){var l=String(c.value==null?"":c.value).length; if(l>m)m=l;}); col.width=Math.min(m+2,50); }
+    ws.views=[{state:"frozen",ySplit:1}];
+    var buf=await wb.xlsx.writeBuffer();
+    var blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="controle-packing-list.xlsx"; a.click();
+  }
+})();
+</script>
+</body>
+</html>

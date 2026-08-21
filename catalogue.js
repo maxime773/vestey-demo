@@ -32,7 +32,9 @@ window.ATELIER = {
 
   tools: [
     "commandes-non-sorties.html",
+    "stocks-conhexa.html",
+    "cartographie-flux.html",
     "lecture-sscc.html",
-    "stocks-conhexa.html"
+    "packing-list.html"
   ]
 };
