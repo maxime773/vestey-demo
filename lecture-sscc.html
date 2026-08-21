@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<!-- OUTIL
+     titre: Lecture des n° SSCC
+     description: Décode et contrôle les numéros SSCC des palettes fournisseurs, puis exporte le relevé pour les entrées frigo.
+     categorie: QUAL
+     ia: non
+-->
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Lecture des n° SSCC — Vestey Foods</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="exceljs.min.js"></script>
+<script src="feedback.js"></script>
+<style>
+  .entry{margin-top:20px}
+  .entry label{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate);display:block;margin-bottom:8px}
+  textarea{width:100%;min-height:150px;padding:14px;border:1px solid var(--line-2);border-radius:var(--radius);font-family:var(--mono);font-size:13px;line-height:1.7;color:var(--ink);background:#fff;resize:vertical}
+  textarea:focus{outline:none;border-color:var(--signal)}
+  .hintline{font-family:var(--mono);font-size:11.5px;color:var(--slate);margin-top:8px}
+  .demo-btn{background:none;border:none;color:var(--signal);font-family:var(--mono);font-size:11.5px;text-decoration:underline;cursor:pointer;padding:0}
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:22px}
+  .kpi{border:1px solid var(--line-2);border-radius:var(--radius);padding:14px 16px;background:#fff}
+  .kpi.ok{border-left:4px solid var(--ok)}
+  .kpi.bad{border-left:4px solid #B3261E}
+  .kpi.dup{border-left:4px solid #B8860B}
+  .kpi .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate)}
+  .kpi .v{font-size:1.7rem;font-weight:800;margin-top:4px;line-height:1}
+  @media(max-width:640px){.kpis{grid-template-columns:1fr}}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
+  .b-ok{color:var(--ok);background:var(--ok-soft)}
+  .b-bad{color:#B3261E;background:#FBE9E7}
+  .b-dup{color:#8A6412;background:#FBF3E2}
+  td.mono{font-family:var(--mono);font-size:12px}
+  .exp{margin-top:16px;display:inline-flex;align-items:center;gap:9px;text-decoration:none;background:var(--ok);color:#fff;font-weight:600;font-size:.92rem;padding:11px 16px;border-radius:var(--radius);border:none;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="wrap tool-page">
+  <a class="back" href="index.html">← Catalogue</a>
+
+  <section class="tool-hero">
+    <span class="eyebrow">QUAL · 01</span>
+    <h1>Lecture des n° SSCC</h1>
+    <p>Saisissez ou scannez les numéros SSCC des palettes à l'entrée frigo : l'outil vérifie la clé de contrôle GS1, décode le préfixe entreprise, repère les doublons et produit le relevé prêt à archiver.</p>
+  </section>
+
+  <div class="panel">
+    <div class="panel-strip"><span class="k">TRAITEMENT</span> local · aucun envoi réseau · contrôle de clé GS1</div>
+    <div class="panel-body">
+
+      <div class="entry">
+        <label for="codes">Numéros SSCC — un par ligne (scanner ou saisie)</label>
+        <textarea id="codes" placeholder="Ex. : 00376000123456789&#10;(00)376000123456796&#10;376000123456802"></textarea>
+        <div class="hintline">
+          Le champ accepte le format brut, avec préfixe (00) ou avec espaces.
+          <button class="demo-btn" id="demo" type="button">Charger un jeu d'essai</button>
+        </div>
+      </div>
+
+      <button class="run" id="run">Contrôler les SSCC</button>
+
+      <div id="messages"></div>
+      <div id="results"></div>
+
+    </div>
+  </div>
+
+  <div class="colophon"><span>Vestey Foods France — QUAL · 01</span><span>Contrôle GS1 · ExcelJS</span></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $=function(id){return document.getElementById(id);};
+  var codesEl=$("codes"), runEl=$("run"), msgEl=$("messages"), resEl=$("results");
+  var rows=[];
+
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function clearMessages(){ msgEl.innerHTML=""; }
+  function showMessage(k,h){ var d=document.createElement("div"); d.className="notice "+k; d.innerHTML=h; msgEl.appendChild(d); }
+
+  // --- clé de contrôle GS1 (modulo 10, pondération 3/1 depuis la droite) ---
+  function checkDigit(first17){
+    var sum=0;
+    for(var i=0;i<17;i++){
+      var d=parseInt(first17[i],10);
+      // position depuis la droite : le 1er caractère est en position impaire -> poids 3
+      sum += d * ((i%2===0)?3:1);
+    }
+    var cd=(10-(sum%10))%10;
+    return cd;
+  }
+  function clean(line){ return String(line).replace(/^\(00\)/,"").replace(/[\s\-\.]/g,"").trim(); }
+
+  function analyse(){
+    clearMessages(); resEl.innerHTML="";
+    var lines=codesEl.value.split(/\r?\n/).map(function(l){return l.trim();}).filter(function(l){return l!=="";});
+    if(!lines.length){ showMessage("err","Saisissez au moins un numéro SSCC."); return; }
+
+    var seen=Object.create(null);
+    rows=lines.map(function(raw){
+      var c=clean(raw);
+      var r={raw:raw, code:c, ext:"", prefix:"", serial:"", lvl:"ok", note:""};
+      if(!/^\d+$/.test(c)){ r.lvl="bad"; r.note="caractères non numériques"; return r; }
+      if(c.length!==18){ r.lvl="bad"; r.note="longueur "+c.length+" (18 attendus)"; return r; }
+      var expected=checkDigit(c.slice(0,17));
+      var actual=parseInt(c[17],10);
+      if(expected!==actual){ r.lvl="bad"; r.note="clé invalide (attendue "+expected+")"; return r; }
+      r.ext=c[0];
+      r.prefix=c.slice(1,8);
+      r.serial=c.slice(8,17);
+      if(seen[c]){ r.lvl="dup"; r.note="doublon (déjà ligne "+seen[c]+")"; }
+      else { seen[c]=lines.indexOf(raw)+1; r.note="valide"; }
+      return r;
+    });
+
+    // marquer les doublons repérés après coup
+    var counts=Object.create(null);
+    rows.forEach(function(r){ if(r.lvl!=="bad") counts[r.code]=(counts[r.code]||0)+1; });
+    rows.forEach(function(r){ if(r.lvl!=="bad" && counts[r.code]>1) r.lvl="dup"; });
+
+    render();
+    try{fetch("/.netlify/functions/track",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool:"lecture-sscc"})}).catch(function(){});}catch(e){}
+  }
+
+  function render(){
+    var c={ok:0,bad:0,dup:0}; rows.forEach(function(r){ c[r.lvl]++; });
+    var html='<div class="kpis">'+
+      '<div class="kpi ok"><div class="l">Valides</div><div class="v">'+c.ok+'</div></div>'+
+      '<div class="kpi bad"><div class="l">Invalides</div><div class="v">'+c.bad+'</div></div>'+
+      '<div class="kpi dup"><div class="l">Doublons</div><div class="v">'+c.dup+'</div></div>'+
+    '</div>';
+
+    html+='<div class="results"><table class="tbl"><thead><tr>'+
+      '<th>SSCC</th><th>Ext.</th><th>Préfixe entreprise</th><th>Série</th><th>Constat</th>'+
+      '</tr></thead><tbody>';
+    rows.forEach(function(r){
+      var lab={ok:'<span class="badge b-ok">Valide</span>',bad:'<span class="badge b-bad">Invalide</span>',dup:'<span class="badge b-dup">Doublon</span>'}[r.lvl];
+      html+='<tr><td class="mono">'+esc(r.code||r.raw)+'</td><td class="mono">'+esc(r.ext||"—")+'</td>'+
+            '<td class="mono">'+esc(r.prefix||"—")+'</td><td class="mono">'+esc(r.serial||"—")+'</td>'+
+            '<td>'+lab+' <span style="color:var(--slate);font-size:.85rem">'+esc(r.note)+'</span></td></tr>';
+    });
+    html+='</tbody></table><button class="exp" id="exp">⬇ Exporter le relevé (.xlsx)</button></div>';
+    resEl.innerHTML=html;
+    $("exp").addEventListener("click", exportXlsx);
+
+    if(c.bad) showMessage("warn","<strong>"+c.bad+"</strong> numéro(s) rejeté(s) par le contrôle de clé GS1 — à vérifier physiquement sur la palette avant réception.");
+  }
+
+  async function exportXlsx(){
+    var wb=new ExcelJS.Workbook(); var ws=wb.addWorksheet("Relevé SSCC");
+    ws.addRow(["SSCC","Extension","Préfixe entreprise","N° de série","Constat","Détail"]);
+    ws.getRow(1).eachCell(function(c){ c.font={bold:true,color:{argb:"FFFFFFFF"}}; c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF143F2B"}}; });
+    var labels={ok:"Valide",bad:"Invalide",dup:"Doublon"};
+    rows.forEach(function(r){ ws.addRow([r.code||r.raw,r.ext,r.prefix,r.serial,labels[r.lvl],r.note]); });
+    ws.getColumn(1).numFmt="@";
+    for(var i=1;i<=6;i++){ var col=ws.getColumn(i),m=10; col.eachCell(function(c){var l=String(c.value==null?"":c.value).length; if(l>m)m=l;}); col.width=Math.min(m+2,40); }
+    ws.views=[{state:"frozen",ySplit:1}];
+    var buf=await wb.xlsx.writeBuffer();
+    var blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="releve-sscc.xlsx"; a.click();
+  }
+
+  runEl.addEventListener("click", analyse);
+  $("demo").addEventListener("click", function(){ codesEl.value=window.__DEMO_SSCC__||""; });
+
+  // jeu d'essai injecté au chargement (clés recalculées pour être justes)
+  function withKey(first17){
+    var sum=0; for(var i=0;i<17;i++){ sum += parseInt(first17[i],10) * ((i%2===0)?3:1); }
+    return first17 + String((10-(sum%10))%10);
+  }
+  var demo=[
+    withKey("03760001234567891"),
+    "(00)"+withKey("03760001234567892"),
+    withKey("03760001234567893"),
+    withKey("03760001234567891"),            // doublon volontaire
+    "0376000123456789 4",                    // clé fausse volontaire
+    withKey("03454000987654321"),
+    "376000123456",                          // trop court volontaire
+    withKey("03760001234567895")
+  ];
+  window.__DEMO_SSCC__=demo.join("\n");
+})();
+</script>
+</body>
+</html>

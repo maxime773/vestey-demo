@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<!-- OUTIL
+     titre: Contrôle des stocks Conhexa
+     description: Rapproche l'état de stock du prestataire avec le stock théorique interne et isole les écarts par référence.
+     categorie: ADV
+     ia: non
+-->
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Contrôle des stocks Conhexa — Vestey Foods</title>
+<link rel="stylesheet" href="styles.css" />
+<script src="exceljs.min.js"></script>
+<script src="feedback.js"></script>
+<style>
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .slot .slot-label{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate);margin-bottom:8px}
+  .drop.mini{padding:26px 16px}
+  .drop.mini .drop-icon{font-size:24px}
+  .drop.mini .drop-title{font-size:.95rem}
+  @media(max-width:640px){.twocol{grid-template-columns:1fr}}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:22px}
+  .kpi{border:1px solid var(--line-2);border-radius:var(--radius);padding:14px 16px;background:#fff}
+  .kpi.bad{border-left:4px solid #B3261E}
+  .kpi.miss{border-left:4px solid #B8860B}
+  .kpi.extra{border-left:4px solid var(--signal)}
+  .kpi.ok{border-left:4px solid var(--ok)}
+  .kpi .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--slate)}
+  .kpi .v{font-size:1.7rem;font-weight:800;margin-top:4px;line-height:1}
+  @media(max-width:700px){.kpis{grid-template-columns:1fr 1fr}}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;white-space:nowrap}
+  .b-bad{color:#B3261E;background:#FBE9E7}
+  .b-miss{color:#8A6412;background:#FBF3E2}
+  .b-extra{color:#8A4B12;background:#FCEBD6}
+  .b-ok{color:var(--ok);background:var(--ok-soft)}
+  .filters{display:flex;gap:8px;margin-top:20px;flex-wrap:wrap}
+  .fbtn{font-family:var(--mono);font-size:11.5px;padding:7px 12px;border:1px solid var(--line-2);background:#fff;border-radius:999px;cursor:pointer;color:var(--slate)}
+  .fbtn.on{background:var(--steel);color:var(--paper);border-color:var(--steel)}
+  .exp{margin-left:auto}
+  td.neg{color:#B3261E;font-weight:700}
+  td.pos{color:var(--signal);font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap tool-page">
+  <a class="back" href="index.html">← Catalogue</a>
+
+  <section class="tool-hero">
+    <span class="eyebrow">ADV · 02</span>
+    <h1>Contrôle des stocks Conhexa</h1>
+    <p>Déposez l'état de stock du prestataire et votre stock théorique : l'outil rapproche référence par référence et isole tous les écarts — manquants, excédents, et références absentes d'un côté ou de l'autre.</p>
+  </section>
+
+  <div class="panel">
+    <div class="panel-strip"><span class="k">TRAITEMENT</span> local · aucun envoi réseau · .xlsx / .csv</div>
+    <div class="panel-body">
+
+      <div class="twocol">
+        <div class="slot">
+          <div class="slot-label">1 · État de stock Conhexa</div>
+          <div class="drop mini" id="drop-a" tabindex="0" role="button" aria-label="État de stock Conhexa">
+            <div class="drop-icon">🏭</div><div class="drop-title">Glissez le fichier</div><div class="drop-hint">.xlsx ou .csv</div>
+            <input type="file" id="file-a" accept=".xlsx,.csv" hidden />
+          </div>
+        </div>
+        <div class="slot">
+          <div class="slot-label">2 · Stock théorique interne</div>
+          <div class="drop mini" id="drop-b" tabindex="0" role="button" aria-label="Stock théorique interne">
+            <div class="drop-icon">📒</div><div class="drop-title">Glissez le fichier</div><div class="drop-hint">.xlsx ou .csv</div>
+            <input type="file" id="file-b" accept=".xlsx,.csv" hidden />
+          </div>
+        </div>
+      </div>
+
+      <button class="run" id="run" disabled>Rapprocher les stocks</button>
+
+      <div class="progress" id="progress" hidden>
+        <div class="track"><div class="fill" id="fill"></div></div>
+        <div class="pstatus" id="pstatus"></div>
+      </div>
+
+      <div id="messages"></div>
+      <div id="results"></div>
+
+    </div>
+  </div>
+
+  <div class="colophon"><span>Vestey Foods France — ADV · 02</span><span>ExcelJS — embarqué</span></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var $=function(id){return document.getElementById(id);};
+  var runEl=$("run"), progEl=$("progress"), fillEl=$("fill"), statusEl=$("pstatus"),
+      msgEl=$("messages"), resEl=$("results");
+  var fileA=null, fileB=null, busy=false, rows=[], filter="ecarts";
+
+  function fmtSize(b){ if(b<1024)return b+" o"; if(b<1048576)return (b/1024).toFixed(0)+" Ko"; return (b/1048576).toFixed(1)+" Mo"; }
+  function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+  function clearMessages(){ msgEl.innerHTML=""; }
+  function showMessage(k,h){ var d=document.createElement("div"); d.className="notice "+k; d.innerHTML=h; msgEl.appendChild(d); }
+  function setProgress(p,t){ progEl.hidden=false; fillEl.style.width=Math.max(0,Math.min(100,p))+"%"; statusEl.textContent=t; }
+
+  function wire(dropId,inputId,setter,icon,label){
+    var drop=$(dropId), input=$(inputId);
+    function set(f){
+      if(!f) return;
+      if(!/\.(xlsx|csv)$/i.test(f.name)){ clearMessages(); showMessage("err","Format non pris en charge : "+esc(f.name)); return; }
+      setter(f); resEl.innerHTML=""; clearMessages();
+      drop.classList.add("has");
+      drop.innerHTML='<div class="drop-icon">✅</div><div class="drop-title">'+esc(f.name)+'</div><div class="drop-hint">'+fmtSize(f.size)+'</div>';
+      refresh();
+    }
+    drop.addEventListener("click",function(){ if(!busy) input.click(); });
+    drop.addEventListener("keydown",function(e){ if((e.key==="Enter"||e.key===" ")&&!busy){ e.preventDefault(); input.click(); } });
+    input.addEventListener("change",function(e){ set(e.target.files[0]); });
+    ["dragenter","dragover"].forEach(function(ev){ drop.addEventListener(ev,function(e){ e.preventDefault(); if(!busy) drop.classList.add("over"); }); });
+    ["dragleave","drop"].forEach(function(ev){ drop.addEventListener(ev,function(e){ e.preventDefault(); drop.classList.remove("over"); }); });
+    drop.addEventListener("drop",function(e){ if(busy) return; var f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) set(f); });
+  }
+  wire("drop-a","file-a",function(f){fileA=f;});
+  wire("drop-b","file-b",function(f){fileB=f;});
+  function refresh(){ runEl.disabled = busy || !fileA || !fileB; }
+
+  function detectDelim(l){ var c=(l.match(/,/g)||[]).length,s=(l.match(/;/g)||[]).length; return s>c?";":","; }
+  function parseCSV(text){
+    text=text.replace(/^\uFEFF/,""); var nl=text.indexOf("\n"); var d=detectDelim(text.slice(0,nl>=0?nl:text.length));
+    var rs=[],row=[],f="",q=false;
+    for(var i=0;i<text.length;i++){ var ch=text[i];
+      if(q){ if(ch==='"'){ if(text[i+1]==='"'){f+='"';i++;} else q=false; } else f+=ch; }
+      else { if(ch==='"')q=true; else if(ch===d){row.push(f);f="";} else if(ch==="\n"){row.push(f);rs.push(row);row=[];f="";} else if(ch!=="\r")f+=ch; }
+    }
+    if(f!==""||row.length){row.push(f);rs.push(row);}
+    return rs;
+  }
+  async function loadSheet(file){
+    var wb=new ExcelJS.Workbook();
+    if(/\.csv$/i.test(file.name)){
+      var rs=parseCSV(await file.text()).filter(function(r){return r.length;});
+      var ws=wb.addWorksheet("F1"); rs.forEach(function(r){ ws.addRow(r); }); return ws;
+    }
+    await wb.xlsx.load(await file.arrayBuffer());
+    var s=wb.worksheets[0]; if(!s) throw new Error("aucune feuille trouvée"); return s;
+  }
+  function norm(s){ return String(s==null?"":s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase().trim(); }
+  function findCol(h,keys){ for(var i=0;i<h.length;i++){ var x=norm(h[i]); for(var k=0;k<keys.length;k++){ if(x.indexOf(keys[k])>=0) return i+1; } } return 0; }
+  function num(v){ if(v==null||v==="")return null; if(typeof v==="number")return v; var n=parseFloat(String(v).replace(/\s/g,"").replace(",",".")); return isNaN(n)?null:n; }
+
+  async function readStock(file, label){
+    var ws=await loadSheet(file);
+    var headers=[]; ws.getRow(1).eachCell({includeEmpty:true},function(c){ headers.push(c.value); });
+    var cRef=findCol(headers,["reference","ref","sku","article","code produit","code"]);
+    var cLib=findCol(headers,["designation","libelle","produit","description","nom"]);
+    var cQte=findCol(headers,["quantite","qte","stock","cartons","colis","nombre"]);
+    if(!cRef||!cQte) throw new Error("colonnes « référence » et « quantité » introuvables dans "+label);
+    var map=new Map();
+    for(var r=2;r<=ws.actualRowCount;r++){
+      var row=ws.getRow(r);
+      var ref=row.getCell(cRef).value; if(ref==null||String(ref).trim()==="") continue;
+      var key=String(ref).trim().toUpperCase();
+      var q=num(row.getCell(cQte).value); if(q==null) q=0;
+      var lib=cLib?row.getCell(cLib).value:"";
+      if(map.has(key)){ var e=map.get(key); e.q+=q; }
+      else map.set(key,{ref:String(ref).trim(), lib:lib, q:q});
+    }
+    return map;
+  }
+
+  runEl.addEventListener("click", async function(){
+    if(!fileA||!fileB||busy) return;
+    busy=true; runEl.disabled=true; runEl.textContent="Rapprochement…"; clearMessages(); resEl.innerHTML="";
+    try{
+      setProgress(20,"Lecture de l'état Conhexa…");
+      var A=await readStock(fileA,"l'état Conhexa");
+      setProgress(50,"Lecture du stock interne…");
+      var B=await readStock(fileB,"le stock interne");
+
+      setProgress(75,"Comparaison des références…");
+      var keys=new Set(); A.forEach(function(v,k){keys.add(k);}); B.forEach(function(v,k){keys.add(k);});
+      rows=[];
+      keys.forEach(function(k){
+        var a=A.get(k), b=B.get(k);
+        var qa=a?a.q:null, qb=b?b.q:null;
+        var lvl, delta=null;
+        if(a&&b){ delta=qa-qb; lvl = delta===0 ? "ok" : (delta<0 ? "bad" : "extra"); }
+        else if(a&&!b){ lvl="extra_only"; }
+        else { lvl="miss_only"; }
+        rows.push({ref:(a||b).ref, lib:(a&&a.lib)||(b&&b.lib)||"", qa:qa, qb:qb, delta:delta, lvl:lvl});
+      });
+      rows.sort(function(x,y){
+        var rank={bad:0,extra:1,miss_only:2,extra_only:3,ok:4};
+        if(rank[x.lvl]!==rank[y.lvl]) return rank[x.lvl]-rank[y.lvl];
+        return Math.abs(y.delta||0)-Math.abs(x.delta||0);
+      });
+
+      setProgress(100,"Terminé — "+rows.length+" références comparées.");
+      render();
+      try{fetch("/.netlify/functions/track",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool:"stocks-conhexa"})}).catch(function(){});}catch(e){}
+    }catch(err){
+      progEl.hidden=true;
+      showMessage("err","Impossible de rapprocher : "+esc(err.message||String(err))+".");
+    }finally{
+      busy=false; runEl.textContent="Rapprocher les stocks"; refresh();
+    }
+  });
+
+  function render(){
+    var c={bad:0,extra:0,miss_only:0,extra_only:0,ok:0};
+    rows.forEach(function(r){ c[r.lvl]++; });
+    var ecarts=c.bad+c.extra+c.miss_only+c.extra_only;
+
+    var visible=rows.filter(function(r){
+      if(filter==="all") return true;
+      if(filter==="ecarts") return r.lvl!=="ok";
+      return r.lvl===filter;
+    });
+
+    var html='<div class="kpis">'+
+      '<div class="kpi bad"><div class="l">Manquants</div><div class="v">'+c.bad+'</div></div>'+
+      '<div class="kpi extra"><div class="l">Excédents</div><div class="v">'+c.extra+'</div></div>'+
+      '<div class="kpi miss"><div class="l">Réf. hors Conhexa</div><div class="v">'+c.miss_only+'</div></div>'+
+      '<div class="kpi ok"><div class="l">Conformes</div><div class="v">'+c.ok+'</div></div>'+
+    '</div>';
+
+    html+='<div class="filters">'+
+      btn("ecarts","Écarts ("+ecarts+")")+btn("all","Toutes ("+rows.length+")")+
+      btn("bad","Manquants")+btn("extra","Excédents")+btn("ok","Conformes")+
+      '<button class="fbtn exp" id="exp">⬇ Exporter les écarts (.xlsx)</button></div>';
+
+    html+='<div class="results"><table class="tbl"><thead><tr>'+
+      '<th>Référence</th><th>Désignation</th><th>Conhexa</th><th>Interne</th><th>Écart</th><th>Constat</th>'+
+      '</tr></thead><tbody>';
+    if(!visible.length) html+='<tr><td colspan="6" style="color:var(--slate)">Aucune ligne dans cette catégorie.</td></tr>';
+    visible.forEach(function(r){
+      var lab={bad:'<span class="badge b-bad">Manquant</span>',extra:'<span class="badge b-extra">Excédent</span>',
+               miss_only:'<span class="badge b-miss">Absent chez Conhexa</span>',
+               extra_only:'<span class="badge b-miss">Absent en interne</span>',
+               ok:'<span class="badge b-ok">Conforme</span>'}[r.lvl];
+      var d = r.delta==null ? "—" : (r.delta>0?"+"+r.delta:r.delta);
+      var cls = r.delta==null?"":(r.delta<0?"neg":(r.delta>0?"pos":""));
+      html+='<tr><td class="fname">'+esc(r.ref)+'</td><td>'+esc(r.lib)+'</td>'+
+            '<td>'+(r.qa==null?"—":r.qa)+'</td><td>'+(r.qb==null?"—":r.qb)+'</td>'+
+            '<td class="'+cls+'">'+d+'</td><td>'+lab+'</td></tr>';
+    });
+    html+='</tbody></table></div>';
+    resEl.innerHTML=html;
+
+    ["ecarts","all","bad","extra","ok"].forEach(function(k){
+      var b=$("f-"+k); if(b) b.addEventListener("click",function(){ filter=k; render(); });
+    });
+    var e=$("exp"); if(e) e.addEventListener("click", exportXlsx);
+  }
+  function btn(k,label){ return '<button class="fbtn'+(filter===k?" on":"")+'" id="f-'+k+'">'+label+'</button>'; }
+
+  async function exportXlsx(){
+    var wb=new ExcelJS.Workbook(); var ws=wb.addWorksheet("Écarts de stock");
+    ws.addRow(["Référence","Désignation","Stock Conhexa","Stock interne","Écart","Constat"]);
+    ws.getRow(1).eachCell(function(c){ c.font={bold:true,color:{argb:"FFFFFFFF"}}; c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FF143F2B"}}; });
+    var labels={bad:"Manquant",extra:"Excédent",miss_only:"Absent chez Conhexa",extra_only:"Absent en interne",ok:"Conforme"};
+    rows.filter(function(r){return r.lvl!=="ok";}).forEach(function(r){
+      ws.addRow([r.ref,r.lib,r.qa==null?"":r.qa,r.qb==null?"":r.qb,r.delta==null?"":r.delta,labels[r.lvl]]);
+    });
+    for(var i=1;i<=6;i++){ var col=ws.getColumn(i),m=10; col.eachCell(function(c){var l=String(c.value==null?"":c.value).length; if(l>m)m=l;}); col.width=Math.min(m+2,45); }
+    ws.views=[{state:"frozen",ySplit:1}];
+    var buf=await wb.xlsx.writeBuffer();
+    var blob=new Blob([buf],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="ecarts-stock-conhexa.xlsx"; a.click();
+  }
+})();
+</script>
+</body>
+</html>
